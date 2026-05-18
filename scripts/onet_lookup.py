@@ -1,17 +1,17 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["httpx", "python-dotenv"]
 # ///
 """Pull KSAOs and RIASEC from O*NET Web Services API (v2)."""
 
 import os
 import sys
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 
-# Load .env from project root
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BASE = "https://api-v2.onetcenter.org"
 API_KEY = os.environ["ONET_API_KEY"]

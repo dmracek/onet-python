@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["httpx", "python-dotenv", "pydantic>=2", "typer", "rich"]
 # ///
 """O*NET CLI — query occupations, KSAOs, RIASEC, and database tables.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Annotated
 
 _repo_root = str(Path(__file__).resolve().parents[1])
 if _repo_root not in sys.path:
@@ -41,7 +42,10 @@ def _bar(value: float, max_val: float = 100, width: int = 25) -> str:
 
 
 @app.command()
-def search(keyword: str, limit: int = typer.Option(10, help="Max results")) -> None:
+def search(
+    keyword: Annotated[str, typer.Argument(help="Search term")],
+    limit: Annotated[int, typer.Option(help="Max results")] = 10,
+) -> None:
     """Search occupations by keyword."""
     with OnetClient() as onet:
         results = onet.search(keyword, end=limit)
@@ -56,9 +60,12 @@ def search(keyword: str, limit: int = typer.Option(10, help="Max results")) -> N
 
 @app.command()
 def profile(
-    code: str = typer.Argument(None, help="SOC code (e.g. 25-2057.00)"),
-    keyword: str = typer.Option(None, "--keyword", "-k", help="Search keyword (uses first result)"),
-    top: int = typer.Option(10, help="Show top N items per category"),
+    code: Annotated[str | None, typer.Argument(help="SOC code (e.g. 25-2057.00)")] = None,
+    keyword: Annotated[
+        str | None,
+        typer.Option("--keyword", "-k", help="Search keyword (uses first result)"),
+    ] = None,
+    top: Annotated[int, typer.Option(help="Show top N items per category")] = 10,
 ) -> None:
     """Full KSAO + RIASEC profile for an occupation."""
     with OnetClient() as onet:
@@ -114,7 +121,7 @@ def profile(
 
 
 @app.command()
-def interests(code: str) -> None:
+def interests(code: Annotated[str, typer.Argument(help="SOC code")]) -> None:
     """RIASEC/Holland codes for an occupation."""
     with OnetClient() as onet:
         items = onet.interests(code)
@@ -131,7 +138,7 @@ def interests(code: str) -> None:
 
 
 @app.command()
-def tasks(code: str) -> None:
+def tasks(code: Annotated[str, typer.Argument(help="SOC code")]) -> None:
     """Task statements for an occupation."""
     with OnetClient() as onet:
         items = onet.tasks(code)
@@ -146,7 +153,7 @@ def tasks(code: str) -> None:
 
 
 @app.command()
-def tech(code: str) -> None:
+def tech(code: Annotated[str, typer.Argument(help="SOC code")]) -> None:
     """Technology skills and hot technologies."""
     with OnetClient() as onet:
         hot = onet.hot_technology(code)
@@ -165,7 +172,7 @@ def tech(code: str) -> None:
 
 
 @app.command()
-def related(code: str) -> None:
+def related(code: Annotated[str, typer.Argument(help="SOC code")]) -> None:
     """Related occupations."""
     with OnetClient() as onet:
         items = onet.related_occupations(code)
@@ -194,8 +201,8 @@ def tables() -> None:
 
 @app.command()
 def table(
-    table_id: str,
-    limit: int = typer.Option(20, help="Max rows to display"),
+    table_id: Annotated[str, typer.Argument(help="Table ID (e.g. Skills)")],
+    limit: Annotated[int, typer.Option(help="Max rows to display")] = 20,
 ) -> None:
     """Fetch rows from a database table."""
     with OnetClient() as onet:
@@ -214,7 +221,7 @@ def table(
 
 
 @app.command()
-def crosswalk(keyword: str) -> None:
+def crosswalk(keyword: Annotated[str, typer.Argument(help="Military keyword or MOS")]) -> None:
     """Military-to-civilian occupation crosswalk."""
     with OnetClient() as onet:
         items = onet.crosswalk_military(keyword)

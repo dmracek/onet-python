@@ -98,11 +98,10 @@ class TestGetApiKey:
 
     def test_raises_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ONET_API_KEY", raising=False)
-        # Prevent load_dotenv from reading the real .env file
         monkeypatch.setattr("onet.client.load_dotenv", lambda: None)
-        from onet.client import _get_api_key
+        from onet.client import MissingAPIKeyError, _get_api_key
 
-        with pytest.raises(OSError, match="ONET_API_KEY not set"):
+        with pytest.raises(MissingAPIKeyError, match="ONET_API_KEY not set"):
             _get_api_key()
 
 
@@ -138,18 +137,14 @@ class TestSearch:
         assert result.code == "25-2021.00"
         assert result.title == "Elementary School Teachers, Except Special Education"
 
-    def test_empty_search(self) -> None:
+    def test_empty_search(self, make_client) -> None:
         transport = StubTransport(
             overrides={
                 "/online/search": {"start": 0, "end": 0, "total": 0, "occupation": []},
             }
         )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
-        assert client.search("xyznonexistent") == []
-        client.close()
+        with make_client(transport) as client:
+            assert client.search("xyznonexistent") == []
 
 
 # ---------------------------------------------------------------------------
@@ -165,23 +160,18 @@ class TestOccupations:
         assert "elementary" in occ.description.lower()
         assert len(occ.sample_of_reported_titles) == 2
 
-    def test_occupations_all_paginates(self) -> None:
+    def test_occupations_all_paginates(self, make_client) -> None:
         """Auto-pagination collects items across two pages."""
         transport = StubTransport(
             overrides={
                 "/online/occupations": [OCCUPATIONS_PAGE_1, OCCUPATIONS_PAGE_2],
             }
         )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
-
-        results = client.occupations_all(page_size=2)
+        with make_client(transport) as client:
+            results = client.occupations_all(page_size=2)
         assert len(results) == 3
         assert results[0].code == "11-1011.00"
         assert results[2].code == "11-1031.00"
-        client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -497,99 +487,40 @@ class TestProfilerCareers:
 
 
 class TestRetry:
-    def test_retries_on_429(self) -> None:
-        """Client retries transient 429 and succeeds on second attempt."""
-        transport = StubTransport(
-            overrides={
-                "/online/search": [
-                    429,
-                    {
-                        "start": 1,
-                        "end": 1,
-                        "total": 1,
-                        "occupation": [
-                            {
-                                "href": "",
-                                "code": "11-1011.00",
-                                "title": "Chief Executives",
-                                "tags": {},
-                            }
-                        ],
-                    },
-                ],
-            }
-        )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
+    @staticmethod
+    def _success_response() -> dict[str, object]:
+        return {
+            "start": 1,
+            "end": 1,
+            "total": 1,
+            "occupation": [
+                {"href": "", "code": "11-1011.00", "title": "Chief Executives", "tags": {}}
+            ],
+        }
 
-        results = client.search("ceo")
+    @pytest.mark.parametrize(
+        "transient_code",
+        [pytest.param(429, id="rate-limit"), pytest.param(500, id="server-error")],
+    )
+    def test_retries_on_transient(self, make_client, transient_code: int) -> None:
+        """Client retries transient status codes and succeeds on second attempt."""
+        transport = StubTransport(
+            overrides={"/online/search": [transient_code, self._success_response()]}
+        )
+        with make_client(transport) as client:
+            results = client.search("ceo")
         assert len(results) == 1
         assert results[0].code == "11-1011.00"
-        client.close()
 
-    def test_retries_on_500(self) -> None:
-        """Client retries transient 500 and succeeds on second attempt."""
-        transport = StubTransport(
-            overrides={
-                "/online/search": [
-                    500,
-                    {
-                        "start": 1,
-                        "end": 1,
-                        "total": 1,
-                        "occupation": [
-                            {
-                                "href": "",
-                                "code": "11-1011.00",
-                                "title": "Chief Executives",
-                                "tags": {},
-                            }
-                        ],
-                    },
-                ],
-            }
-        )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
-
-        results = client.search("ceo")
-        assert len(results) == 1
-        client.close()
-
-    def test_raises_on_persistent_error(self) -> None:
+    def test_raises_on_persistent_error(self, make_client) -> None:
         """Client raises after exhausting retries."""
-        transport = StubTransport(
-            overrides={
-                "/online/search": [500, 500, 500],
-            }
-        )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
-
-        with pytest.raises(httpx.HTTPStatusError):
+        transport = StubTransport(overrides={"/online/search": [500, 500, 500]})
+        with make_client(transport) as client, pytest.raises(httpx.HTTPStatusError):
             client.search("ceo")
-        client.close()
 
-    def test_raises_immediately_on_non_transient(self) -> None:
+    def test_raises_immediately_on_non_transient(self, make_client) -> None:
         """Client does not retry 401/403/404."""
-        transport = StubTransport(
-            overrides={
-                "/online/search": [401],
-            }
-        )
-        client = OnetClient.__new__(OnetClient)
-        client._base_url = "https://api-v2.onetcenter.org"
-        client._api_key = "test"
-        client._client = httpx.Client(transport=transport)
-
-        with pytest.raises(httpx.HTTPStatusError):
+        transport = StubTransport(overrides={"/online/search": [401]})
+        with make_client(transport) as client, pytest.raises(httpx.HTTPStatusError):
             client.search("ceo")
-        # Should have made exactly 1 request (no retry)
         assert len(transport._request_log) == 1
-        client.close()

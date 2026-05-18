@@ -45,6 +45,15 @@ from onet.models import (
     WorkContext,
 )
 
+
+class OnetError(Exception):
+    """Base class for all onet-python errors."""
+
+
+class MissingAPIKeyError(OnetError):
+    """ONET_API_KEY is not set in the environment."""
+
+
 BASE_URL = "https://api-v2.onetcenter.org"
 
 # Transient status codes worth retrying
@@ -83,7 +92,7 @@ def _get_api_key() -> str:
             "https://onetcenter.org/developer/ "
             "and add it to your .env file."
         )
-        raise OSError(msg)
+        raise MissingAPIKeyError(msg)
     return key
 
 
@@ -99,7 +108,12 @@ class OnetClient:
             profile = onet.occupation_profile("25-2057.00")
     """
 
-    def __init__(self, api_key: str | None = None, base_url: str = BASE_URL) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = BASE_URL,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url
         self._api_key = api_key or _get_api_key()
         self._client = httpx.Client(
@@ -108,6 +122,7 @@ class OnetClient:
                 "X-API-Key": self._api_key,
             },
             timeout=30,
+            transport=transport,
         )
 
     def __enter__(self) -> OnetClient:
@@ -428,7 +443,7 @@ class OnetClient:
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Cosine similarity between two equal-length vectors. Returns 0.0 for zero vectors."""
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))
         if norm_a == 0 or norm_b == 0:

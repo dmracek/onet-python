@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import httpx
 import pytest
 
 from onet.client import OnetClient
 from onet.models import (
     Interest,
+    OccupationDetail,
     OccupationProfile,
     RiasecFitResult,
     ScoredElement,
@@ -93,36 +93,30 @@ ZOOLOGIST_PROFILE = OccupationProfile(
 )
 
 
+_FIXTURE_PROFILES: dict[str, OccupationProfile] = {
+    "25-2021.00": TEACHER_PROFILE,
+    "19-1023.00": ZOOLOGIST_PROFILE,
+}
+
+
 @pytest.fixture
-def analysis_client() -> OnetClient:
-    """Client with patched occupation_profile that returns canned profiles."""
-    transport = StubTransport()
-    client = OnetClient.__new__(OnetClient)
-    client._base_url = "https://api-v2.onetcenter.org"
-    client._api_key = "test"
-    client._client = httpx.Client(transport=transport, headers={"Accept": "application/json"})
+def analysis_client(monkeypatch: pytest.MonkeyPatch) -> OnetClient:
+    """Client whose profile/occupation/interests methods return canned fixtures."""
+    client = OnetClient(api_key="test", transport=StubTransport())
 
-    # Patch methods to return our fixtures without API calls
-    profiles = {
-        "25-2021.00": TEACHER_PROFILE,
-        "19-1023.00": ZOOLOGIST_PROFILE,
-    }
+    def fake_profile(self: OnetClient, code: str) -> OccupationProfile:
+        return _FIXTURE_PROFILES[code]
 
-    def fake_profile(code: str) -> OccupationProfile:
-        return profiles[code]
-
-    def fake_occupation(code: str):
-        p = profiles[code]
-        from onet.models import OccupationDetail
-
+    def fake_occupation(self: OnetClient, code: str) -> OccupationDetail:
+        p = _FIXTURE_PROFILES[code]
         return OccupationDetail(code=p.code, title=p.title, description=p.description)
 
-    def fake_interests(code: str):
-        return profiles[code].interests
+    def fake_interests(self: OnetClient, code: str) -> list[Interest]:
+        return _FIXTURE_PROFILES[code].interests
 
-    client.occupation_profile = fake_profile  # type: ignore[method-assign]
-    client.occupation = fake_occupation  # type: ignore[method-assign]
-    client.interests = fake_interests  # type: ignore[method-assign]
+    monkeypatch.setattr(OnetClient, "occupation_profile", fake_profile)
+    monkeypatch.setattr(OnetClient, "occupation", fake_occupation)
+    monkeypatch.setattr(OnetClient, "interests", fake_interests)
     return client
 
 
@@ -306,7 +300,7 @@ class TestRiasecFit:
         ],
     )
     def test_accepts_multiple_key_formats(
-        self, analysis_client: OnetClient, key_format: dict
+        self, analysis_client: OnetClient, key_format: dict[str, float]
     ) -> None:
         result = analysis_client.riasec_fit(key_format, "25-2021.00")
         assert result.score > 0
@@ -316,23 +310,6 @@ class TestRiasecFit:
         result = analysis_client.riasec_fit(scores, "25-2021.00")
         assert result.person_profile["Social"] == 80
         assert result.occupation_profile["Social"] == 100
-
-    @pytest.mark.parametrize(
-        "score_range, expected_fit",
-        [
-            pytest.param((0.85, 1.0), "strong", id="strong-threshold"),
-            pytest.param((0.65, 0.85), "good", id="good-threshold"),
-            pytest.param((0.45, 0.65), "moderate", id="moderate-threshold"),
-            pytest.param((0.0, 0.45), "weak", id="weak-threshold"),
-        ],
-    )
-    def test_fit_labels(self, score_range: tuple, expected_fit: str) -> None:
-        """Verify fit label thresholds using synthetic data."""
-        # Build a person profile that will hit the target score range
-        # by comparing against a known occupation profile (teacher)
-        # This is a unit test of the label logic, not the scoring
-        result = RiasecFitResult(code="x", title="x", score=sum(score_range) / 2, fit=expected_fit)
-        assert result.fit == expected_fit
 
 
 # ---------------------------------------------------------------------------

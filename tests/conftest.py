@@ -396,7 +396,9 @@ _ROUTE_MAP: dict[str, Any] = {
     "/online/occupations/25-2021.00/details/tasks": TASKS_RESPONSE,
     "/online/occupations/25-2021.00/details/work_activities": WORK_ACTIVITIES_RESPONSE,
     "/online/occupations/25-2021.00/details/work_context": WORK_CONTEXT_RESPONSE,
-    "/online/occupations/25-2021.00/details/detailed_work_activities": DETAILED_WORK_ACTIVITIES_RESPONSE,
+    "/online/occupations/25-2021.00/details/detailed_work_activities": (
+        DETAILED_WORK_ACTIVITIES_RESPONSE
+    ),
     "/online/occupations/25-2021.00/details/education": EDUCATION_RESPONSE,
     "/online/occupations/25-2021.00/details/job_zone": JOB_ZONE_RESPONSE,
     "/online/occupations/25-2021.00/hot_technology": HOT_TECHNOLOGY_RESPONSE,
@@ -462,10 +464,14 @@ def stub_transport() -> StubTransport:
 @pytest.fixture
 def onet(stub_transport: StubTransport) -> OnetClient:
     """OnetClient wired to stub transport — no real HTTP calls."""
-    client = OnetClient.__new__(OnetClient)
-    client._base_url = "https://api-v2.onetcenter.org"
-    client._api_key = "test-key"
-    client._client = httpx.Client(
-        transport=stub_transport, headers={"Accept": "application/json", "X-API-Key": "test-key"}
-    )
-    return client
+    return OnetClient(api_key="test-key", transport=stub_transport)
+
+
+@pytest.fixture
+def make_client():
+    """Factory: build an OnetClient against a given stub transport."""
+
+    def _make(transport: StubTransport) -> OnetClient:
+        return OnetClient(api_key="test-key", transport=transport)
+
+    return _make

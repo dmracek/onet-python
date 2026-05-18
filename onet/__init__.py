@@ -9,7 +9,7 @@ Usage::
         profile = onet.occupation_profile(results[0].code)
 """
 
-from onet.client import OnetClient
+from onet.client import MissingAPIKeyError, OnetClient, OnetError
 from onet.models import (
     AnswerOption,
     DetailedWorkActivity,
@@ -41,6 +41,8 @@ from onet.models import (
 
 __all__ = [
     "OnetClient",
+    "OnetError",
+    "MissingAPIKeyError",
     "AnswerOption",
     "DetailedWorkActivity",
     "Education",

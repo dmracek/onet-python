@@ -3,13 +3,14 @@ name = "onet"
 version = "0.1.0"
 description = "Typed Python client for the O*NET Web Services API v2, with a CLI."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Derek Mracek" }]
 keywords = ["onet", "occupations", "ksao", "riasec", "labor-data"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering",
@@ -42,7 +43,7 @@ packages = ["onet"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
