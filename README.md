@@ -2,7 +2,7 @@
 
 A typed Python client for the [O\*NET Web Services API v2](https://onetcenter.org/reference/), with a CLI for quick lookups.
 
-Built on httpx + Pydantic. Every response is a typed model, every list endpoint auto-paginates, and transient errors (429, 5xx) retry automatically.
+Built on httpx + Pydantic. Every response is a typed model. List endpoints come in two flavors — paged (default) and `_all` (auto-paginated). Transient errors (429, 5xx, network timeouts) retry with exponential backoff and honor `Retry-After`.
 
 Inspired by the excellent [onet2r](https://github.com/farach/onet2r) R package by Alex Farach.
 
@@ -84,7 +84,8 @@ uv run onet/cli.py crosswalk "infantry"
 
 | Method | Description |
 |---|---|
-| `search(keyword)` | Search occupations by keyword, title, or SOC code |
+| `search(keyword)` | Search occupations (single page, 20 results) |
+| `search_all(keyword)` | All search results, auto-paginated |
 | `occupations()` | List occupations (single page) |
 | `occupations_all()` | All occupations, auto-paginated |
 | `occupation(code)` | Occupation overview (description, sample titles) |
@@ -99,9 +100,9 @@ uv run onet/cli.py crosswalk "infantry"
 | `work_styles(code)` | `list[ScoredElement]` | Work styles by importance |
 | `work_activities(code)` | `list[ScoredElement]` | Work activities by importance |
 | `interests(code)` | `list[Interest]` | RIASEC/Holland codes with scores |
-| `tasks(code)` | `list[Task]` | Task statements |
+| `tasks(code)` / `tasks_all(code)` | `list[Task]` | Task statements (paged / auto-paginated) |
 | `work_context(code)` | `list[WorkContext]` | Work context elements |
-| `detailed_work_activities(code)` | `list[DetailedWorkActivity]` | Granular activity descriptions |
+| `detailed_work_activities(code)` / `..._all(code)` | `list[DetailedWorkActivity]` | Granular activity descriptions |
 | `education(code)` | `list[Education]` | Education level distribution |
 | `job_zone(code)` | `JobZone` | Zone classification (training, experience, education) |
 
@@ -109,15 +110,15 @@ uv run onet/cli.py crosswalk "infantry"
 
 | Method | Returns | Description |
 |---|---|---|
-| `technology_skills(code)` | `list[TechnologySkill]` | Tech skills flattened from category structure |
-| `hot_technology(code)` | `list[HotTechnology]` | Hot/in-demand technologies |
+| `technology_skills(code)` | `list[TechnologySkill]` | Tech skills flattened from category structure (includes `example` and `example_more`) |
+| `hot_technology(code)` / `hot_technology_all(code)` | `list[HotTechnology]` | Hot/in-demand technologies (paged / auto-paginated) |
 
 ### Relationships & Taxonomy
 
 | Method | Returns | Description |
 |---|---|---|
 | `related_occupations(code)` | `list[OccupationRef]` | Related occupations |
-| `crosswalk_military(keyword)` | `list[MilitaryCrosswalk]` | Military-to-civilian crosswalk |
+| `crosswalk_military(keyword)` / `crosswalk_military_all(keyword)` | `list[MilitaryCrosswalk]` | Military-to-civilian crosswalk (paged / auto-paginated) |
 | `taxonomy_map(code, from, to)` | `list[TaxonomyMapping]` | Map SOC codes between taxonomy versions |
 
 ### Database Access
@@ -138,8 +139,9 @@ uv run onet/cli.py crosswalk "infantry"
 
 - **Auth:** `X-API-Key` header on every request, per the v2 API spec
 - **Base URL:** `https://api-v2.onetcenter.org`
-- **Retry:** Automatic retry (3 attempts) on 429 and 5xx status codes
-- **Pagination:** `_paginate()` reads `total`/`end` from each response page and loops until complete
+- **Retry:** Up to 3 attempts on 429, 5xx, and network errors (timeouts, connection refused) with exponential backoff + jitter; honors `Retry-After` on rate-limited responses
+- **Pagination:** Paged methods accept `start`/`end` and return one page; `_all` variants loop with `_paginate()` until `end >= total`
+- **Errors:** `OnetHTTPError` for non-transient HTTP failures, `OnetTransientError` after retries exhausted, `MissingAPIKeyError` if `ONET_API_KEY` is unset — all subclass `OnetError`
 - **Normalization:** All API response keys are recursively converted to snake_case
 - **Models:** Every response is validated through Pydantic v2 models
 

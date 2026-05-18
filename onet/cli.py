@@ -29,7 +29,7 @@ import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-from onet.client import OnetClient  # noqa: E402
+from onet.client import OnetClient, _to_snake_case  # noqa: E402
 from onet.models import ScoredElement  # noqa: E402
 
 app = typer.Typer(name="onet", help="O*NET Web Services CLI", no_args_is_help=True)
@@ -209,12 +209,12 @@ def table(
         cols = onet.table_info(table_id)
         rows = onet.table_rows(table_id)
 
-    col_names = [c.name for c in cols]
+    row_keys = [_to_snake_case(c.column_id) for c in cols]
     t = Table(title=f"Table: {table_id} ({len(rows)} rows)")
-    for name in col_names:
-        t.add_column(name)
+    for c in cols:
+        t.add_column(c.title)
     for row in rows[:limit]:
-        t.add_row(*(str(row.get(c, "")) for c in col_names))
+        t.add_row(*(str(row.get(k, "")) for k in row_keys))
     if len(rows) > limit:
         console.print(f"[dim]Showing {limit} of {len(rows)} rows[/dim]")
     console.print(t)

@@ -5,7 +5,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from onet.client import OnetClient, _snake_keys, _to_snake_case
+from onet.client import (
+    OnetClient,
+    OnetHTTPError,
+    OnetTransientError,
+    _snake_keys,
+    _to_snake_case,
+)
 from onet.models import (
     DetailedWorkActivity,
     Education,
@@ -52,6 +58,8 @@ class TestToSnakeCase:
             pytest.param("occupational_interest", "occupational_interest", id="no-op"),
             pytest.param("kebab-case", "kebab_case", id="kebab-case"),
             pytest.param("with spaces", "with_spaces", id="spaces"),
+            pytest.param("O*NET-SOC Code", "o_net_soc_code", id="punctuation-collapse"),
+            pytest.param("foo  bar", "foo_bar", id="multiple-spaces"),
         ],
     )
     def test_converts_to_snake_case(self, input_str: str, expected: str) -> None:
@@ -145,6 +153,28 @@ class TestSearch:
         )
         with make_client(transport) as client:
             assert client.search("xyznonexistent") == []
+
+    def test_search_all_paginates(self, make_client) -> None:
+        """search_all() loops until end >= total."""
+        page_1 = {
+            "start": 1,
+            "end": 2,
+            "total": 3,
+            "occupation": [
+                {"href": "", "code": "25-2021.00", "title": "Elementary"},
+                {"href": "", "code": "25-2022.00", "title": "Middle"},
+            ],
+        }
+        page_2 = {
+            "start": 3,
+            "end": 3,
+            "total": 3,
+            "occupation": [{"href": "", "code": "25-2031.00", "title": "Secondary"}],
+        }
+        transport = StubTransport(overrides={"/online/search": [page_1, page_2]})
+        with make_client(transport) as client:
+            results = client.search_all("teacher", page_size=2)
+        assert [r.code for r in results] == ["25-2021.00", "25-2022.00", "25-2031.00"]
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +339,15 @@ class TestTechnology:
         assert items[0].hot_technology is True
 
     def test_technology_skills_flattened(self, onet: OnetClient) -> None:
-        """Category → example structure is flattened into one item per tool."""
+        """Category → example + example_more flattens into one item per tool."""
         items = onet.technology_skills("25-2021.00")
-        assert len(items) == 2
+        assert len(items) == 3
         assert all(isinstance(t, TechnologySkill) for t in items)
         assert items[0].category_title == "Computer based training software"
         assert items[0].example_name == "Google Classroom"
         assert items[0].hot_technology is True
         assert items[1].example_name == "Nearpod"
-        assert items[1].hot_technology is False
+        assert items[2].example_name == "Schoology"  # from example_more
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +379,9 @@ class TestDatabaseTables:
         cols = onet.table_info("Skills")
         assert len(cols) == 4
         assert all(isinstance(c, TableColumn) for c in cols)
-        assert cols[0].name == "O*NET-SOC Code"
+        assert cols[0].column_id == "O*NET-SOC Code"
+        assert cols[0].title == "O*NET-SOC Code"
+        assert cols[0].type == "varchar"
 
     def test_table_rows(self, onet: OnetClient) -> None:
         rows = onet.table_rows("Skills")
@@ -427,6 +459,19 @@ class TestProfilerQuestions:
 
 
 class TestProfilerResults:
+    @pytest.mark.parametrize(
+        "bad_answers, match",
+        [
+            pytest.param("2" * 29, "exactly 30 or 60", id="too-short"),
+            pytest.param("2" * 61, "exactly 30 or 60", id="too-long"),
+            pytest.param("9" * 60, "digits 1-5", id="invalid-digit"),
+            pytest.param("a" * 60, "digits 1-5", id="non-digit"),
+        ],
+    )
+    def test_validates_answers(self, onet: OnetClient, bad_answers: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            onet.profiler_results(bad_answers)
+
     def test_returns_six_riasec_dimensions(self, onet: OnetClient) -> None:
         results = onet.profiler_results("2" * 60)
         assert len(results) == 6
@@ -487,6 +532,11 @@ class TestProfilerCareers:
 
 
 class TestRetry:
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skip backoff delays during retry tests."""
+        monkeypatch.setattr("onet.client.time.sleep", lambda _: None)
+
     @staticmethod
     def _success_response() -> dict[str, object]:
         return {
@@ -512,15 +562,55 @@ class TestRetry:
         assert len(results) == 1
         assert results[0].code == "11-1011.00"
 
-    def test_raises_on_persistent_error(self, make_client) -> None:
-        """Client raises after exhausting retries."""
+    def test_raises_transient_after_exhausting(self, make_client) -> None:
+        """Persistent 5xx raises OnetTransientError after MAX_RETRIES attempts."""
         transport = StubTransport(overrides={"/online/search": [500, 500, 500]})
-        with make_client(transport) as client, pytest.raises(httpx.HTTPStatusError):
+        with make_client(transport) as client, pytest.raises(OnetTransientError):
             client.search("ceo")
+        assert len(transport._request_log) == 3
 
     def test_raises_immediately_on_non_transient(self, make_client) -> None:
-        """Client does not retry 401/403/404."""
+        """4xx other than 429 surface as OnetHTTPError without retry."""
         transport = StubTransport(overrides={"/online/search": [401]})
-        with make_client(transport) as client, pytest.raises(httpx.HTTPStatusError):
+        with make_client(transport) as client, pytest.raises(OnetHTTPError) as exc_info:
             client.search("ceo")
+        assert exc_info.value.status_code == 401
         assert len(transport._request_log) == 1
+
+    def test_retries_on_request_error(self, make_client) -> None:
+        """Network errors (timeouts, connection refused) retry then succeed."""
+        attempts = {"n": 0}
+        success = self._success_response()
+
+        class FlakyTransport(StubTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise httpx.ConnectTimeout("simulated timeout", request=request)
+                return httpx.Response(200, json=success)
+
+        with make_client(FlakyTransport()) as client:
+            results = client.search("ceo")
+        assert attempts["n"] == 2
+        assert results[0].code == "11-1011.00"
+
+    def test_honors_retry_after_header(self, make_client, monkeypatch: pytest.MonkeyPatch) -> None:
+        """429 with Retry-After header uses that value instead of backoff."""
+        sleeps: list[float] = []
+        monkeypatch.setattr("onet.client.time.sleep", sleeps.append)
+        success = self._success_response()
+
+        class RateLimitedTransport(StubTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self._n = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self._n += 1
+                if self._n == 1:
+                    return httpx.Response(429, headers={"Retry-After": "7"}, json={})
+                return httpx.Response(200, json=success)
+
+        with make_client(RateLimitedTransport()) as client:
+            client.search("ceo")
+        assert sleeps == [7.0]

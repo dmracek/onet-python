@@ -311,6 +311,14 @@ class TestRiasecFit:
         assert result.person_profile["Social"] == 80
         assert result.occupation_profile["Social"] == 100
 
+    def test_empty_person_scores_raises(self, analysis_client: OnetClient) -> None:
+        with pytest.raises(ValueError, match="at least one RIASEC dimension"):
+            analysis_client.riasec_fit({}, "25-2021.00")
+
+    def test_all_unrecognized_keys_raises(self, analysis_client: OnetClient) -> None:
+        with pytest.raises(ValueError, match="No recognized RIASEC keys"):
+            analysis_client.riasec_fit({"foo": 1.0, "bar": 2.0}, "25-2021.00")
+
 
 # ---------------------------------------------------------------------------
 # to_dataframe
@@ -348,6 +356,11 @@ class TestToDataframe:
         df = analysis_client.to_dataframe(["25-2021.00"], sections=["knowledge"])
         ksao_cols = [c for c in df.columns if c not in ("code", "title")]
         assert all(c.startswith("knowledge_") for c in ksao_cols)
+
+    def test_unknown_section_raises(self, analysis_client: OnetClient) -> None:
+        pytest.importorskip("pandas")
+        with pytest.raises(ValueError, match="Unknown sections"):
+            analysis_client.to_dataframe(["25-2021.00"], sections=["work_style"])
 
     def test_values_are_correct(self, analysis_client: OnetClient) -> None:
         pytest.importorskip("pandas")

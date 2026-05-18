@@ -157,11 +157,17 @@ class TableRef(BaseModel):
 
 
 class TableColumn(BaseModel):
-    """Column metadata for a database table."""
+    """Column metadata for a database table.
 
-    name: str
-    type: str
+    `column_id` is the raw column identifier used as the dict key in row data
+    (after snake-case normalization). `title` is the human-readable display name.
+    """
+
+    column_id: str
+    title: str
+    type: str = ""
     description: str = ""
+    optional: bool = False
 
 
 class TableRow(BaseModel, extra="allow"):

@@ -13,10 +13,11 @@ from onet.models import (
     OccupationProfile,
     OccupationRef,
     ScoredElement,
-    TableColumn,
     TableRef,
     Task,
 )
+
+from .conftest import StubTransport
 
 runner = CliRunner()
 
@@ -181,17 +182,16 @@ class TestTablesCommand:
 
 class TestTableCommand:
     def test_displays_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        cols = [
-            TableColumn(name="code", type="varchar", description="SOC"),
-            TableColumn(name="name", type="varchar", description="Skill"),
-        ]
-        rows = [
-            {"code": "25-2021.00", "name": "Reading Comprehension"},
-            {"code": "25-2021.00", "name": "Speaking"},
-        ]
-        monkeypatch.setattr(OnetClient, "table_info", lambda *_a, **_k: cols)
-        monkeypatch.setattr(OnetClient, "table_rows", lambda *_a, **_k: rows)
+        """End-to-end through the stub transport: column metadata + row keys
+        must align via the snake-case lookup, not via fixture coincidence."""
+        transport = StubTransport()
+
+        def _construct(*_args, **_kwargs) -> OnetClient:
+            return OnetClient(api_key="test-key", transport=transport)
+
+        monkeypatch.setattr("onet.cli.OnetClient", _construct)
         result = runner.invoke(app, ["table", "Skills"])
         assert result.exit_code == 0
         assert "Reading Comprehension" in result.output
         assert "Speaking" in result.output
+        assert "25-2021.00" in result.output

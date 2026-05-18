@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import re
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -54,18 +56,80 @@ class MissingAPIKeyError(OnetError):
     """ONET_API_KEY is not set in the environment."""
 
 
+class OnetHTTPError(OnetError):
+    """Non-transient HTTP error returned by the O*NET API."""
+
+    def __init__(self, status_code: int, path: str, message: str) -> None:
+        super().__init__(f"O*NET API returned {status_code} for {path}: {message}")
+        self.status_code = status_code
+        self.path = path
+
+
+class OnetTransientError(OnetError):
+    """Retries exhausted on a transient network or 5xx error."""
+
+
 BASE_URL = "https://api-v2.onetcenter.org"
 
-# Transient status codes worth retrying
+_KSAO_SECTIONS = frozenset({"knowledge", "skills", "abilities", "work_styles", "interests"})
+_PROFILER_ANSWER_LENGTHS = frozenset({30, 60})
+_PROFILER_ANSWER_DIGITS = frozenset("12345")
+_RIASEC_NAMES = ("Realistic", "Investigative", "Artistic", "Social", "Enterprising", "Conventional")
+_RIASEC_CODE_TO_NAME = dict(zip("RIASEC", _RIASEC_NAMES, strict=True))
+
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 30.0
+_BACKOFF_JITTER_SECONDS = 1.0
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with jitter: ~1s, 2s, 4s, ... capped at 30s."""
+    base = min(_BACKOFF_BASE_SECONDS * (2**attempt), _BACKOFF_MAX_SECONDS)
+    return base + random.uniform(0.0, _BACKOFF_JITTER_SECONDS)
+
+
+def _validate_profiler_answers(answers: str) -> None:
+    """Reject obviously-malformed profiler answer strings before hitting the API."""
+    if len(answers) not in _PROFILER_ANSWER_LENGTHS:
+        raise ValueError(
+            f"Profiler answers must be exactly 30 or 60 characters, got {len(answers)}"
+        )
+    bad = {c for c in answers if c not in _PROFILER_ANSWER_DIGITS}
+    if bad:
+        raise ValueError(f"Profiler answers must contain only digits 1-5; found: {sorted(bad)}")
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header value as seconds.
+
+    O*NET sends an integer seconds value in practice; HTTP also allows an
+    RFC 7231 date. We only handle the seconds form — date-form falls back to
+    backoff timing (None return).
+    """
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 def _to_snake_case(s: str) -> str:
-    """Convert CamelCase or mixed-case string to snake_case."""
+    """Convert CamelCase/mixed-case strings to snake_case.
+
+    Splits CamelCase boundaries, lowercases, then collapses any run of
+    non-alphanumeric characters (spaces, hyphens, asterisks, etc.) into a
+    single underscore. Trailing/leading underscores are stripped. This is
+    what `_snake_keys()` applies to response dict keys, so the same function
+    must be used to map a `column_id` value like "O*NET-SOC Code" to its
+    corresponding row dict key.
+    """
     s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
     s = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s)
-    return s.lower().replace(" ", "_").replace("-", "_")
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", s)
+    return s.lower().strip("_")
 
 
 def _snake_keys(d: dict[str, Any]) -> dict[str, Any]:
@@ -137,23 +201,49 @@ class OnetClient:
     # --- HTTP layer ---
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """GET with retry on transient errors."""
+        """GET with exponential backoff on transient errors.
+
+        Retries 429 and 5xx status codes plus `httpx.RequestError` (timeouts,
+        connection errors). Honors `Retry-After` on 429 responses. Non-transient
+        HTTP errors raise `OnetHTTPError`; exhausted retries on transient errors
+        raise `OnetTransientError`. Both subclass `OnetError`.
+        """
         url = f"{self._base_url}{path}"
-        last_exc: Exception | None = None
+        last_transient: Exception | None = None
+
         for attempt in range(_MAX_RETRIES):
             try:
                 r = self._client.get(url, params=params)
-                if r.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES - 1:
+            except httpx.RequestError as exc:
+                last_transient = exc
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_backoff_delay(attempt))
                     continue
-                r.raise_for_status()
-                return _snake_keys(r.json())
-            except httpx.HTTPStatusError as exc:
-                last_exc = exc
-                if exc.response.status_code not in _RETRY_STATUSES:
-                    raise
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError(f"Retries exhausted for {path} with no captured exception")
+                raise OnetTransientError(
+                    f"Request to {path} failed after {_MAX_RETRIES} attempts: {exc}"
+                ) from exc
+
+            if r.status_code in _RETRY_STATUSES:
+                last_transient = httpx.HTTPStatusError(
+                    f"Transient {r.status_code}", request=r.request, response=r
+                )
+                if attempt < _MAX_RETRIES - 1:
+                    retry_after = _parse_retry_after(r.headers.get("Retry-After"))
+                    delay = retry_after if retry_after is not None else _backoff_delay(attempt)
+                    time.sleep(delay)
+                    continue
+                raise OnetTransientError(
+                    f"O*NET API returned {r.status_code} for {path} after {_MAX_RETRIES} attempts"
+                ) from last_transient
+
+            if r.status_code >= 400:
+                raise OnetHTTPError(r.status_code, path, r.text[:200])
+
+            return _snake_keys(r.json())
+
+        raise OnetTransientError(
+            f"Retries exhausted for {path}"
+        ) from last_transient  # pragma: no cover
 
     def _paginate[T: _BaseModel](
         self,
@@ -161,12 +251,16 @@ class OnetClient:
         item_key: str,
         model: type[T],
         page_size: int = 500,
+        extra_params: dict[str, Any] | None = None,
     ) -> list[T]:
         """Auto-paginate through a paged endpoint, returning all items."""
         items: list[T] = []
         start = 1
         while True:
-            data = self._get(path, params={"start": start, "end": start + page_size - 1})
+            params: dict[str, Any] = {"start": start, "end": start + page_size - 1}
+            if extra_params:
+                params.update(extra_params)
+            data = self._get(path, params=params)
             raw_items = data.get(item_key, [])
             items.extend(model.model_validate(el) for el in raw_items)
             total = data.get("total", 0)
@@ -194,9 +288,19 @@ class OnetClient:
     # --- Search ---
 
     def search(self, keyword: str, start: int = 1, end: int = 20) -> list[OccupationRef]:
-        """Search occupations by keyword, title, or SOC code."""
+        """Search occupations by keyword, title, or SOC code (single page)."""
         data = self._get("/online/search", params={"keyword": keyword, "start": start, "end": end})
         return [OccupationRef.model_validate(o) for o in data.get("occupation", [])]
+
+    def search_all(self, keyword: str, page_size: int = 500) -> list[OccupationRef]:
+        """Search occupations by keyword, auto-paginated across every page."""
+        return self._paginate(
+            "/online/search",
+            "occupation",
+            OccupationRef,
+            page_size=page_size,
+            extra_params={"keyword": keyword},
+        )
 
     # --- Occupations ---
 
@@ -251,12 +355,18 @@ class OnetClient:
     # --- Tasks ---
 
     def tasks(self, code: str, start: int = 1, end: int = 100) -> list[Task]:
-        """Task statements for an occupation."""
+        """Task statements for an occupation (single page)."""
         data = self._get(
             f"/online/occupations/{code}/details/tasks",
             params={"start": start, "end": end},
         )
         return [Task.model_validate(t) for t in data.get("task", [])]
+
+    def tasks_all(self, code: str, page_size: int = 500) -> list[Task]:
+        """All task statements for an occupation, auto-paginated."""
+        return self._paginate(
+            f"/online/occupations/{code}/details/tasks", "task", Task, page_size=page_size
+        )
 
     # --- Work context ---
 
@@ -270,12 +380,23 @@ class OnetClient:
     def detailed_work_activities(
         self, code: str, start: int = 1, end: int = 100
     ) -> list[DetailedWorkActivity]:
-        """Detailed work activities."""
+        """Detailed work activities (single page)."""
         data = self._get(
             f"/online/occupations/{code}/details/detailed_work_activities",
             params={"start": start, "end": end},
         )
         return [DetailedWorkActivity.model_validate(a) for a in data.get("activity", [])]
+
+    def detailed_work_activities_all(
+        self, code: str, page_size: int = 500
+    ) -> list[DetailedWorkActivity]:
+        """All detailed work activities for an occupation, auto-paginated."""
+        return self._paginate(
+            f"/online/occupations/{code}/details/detailed_work_activities",
+            "activity",
+            DetailedWorkActivity,
+            page_size=page_size,
+        )
 
     # --- Education ---
 
@@ -294,18 +415,22 @@ class OnetClient:
     # --- Technology ---
 
     def technology_skills(self, code: str) -> list[TechnologySkill]:
-        """Technology skills, flattened from category → example structure."""
+        """Technology skills, flattened from category → example structure.
+
+        Iterates both `example` and `example_more` lists so callers receive the
+        full set of technologies in each category, not just the first page.
+        """
         elements = self._detail_elements(code, "technology_skills")
         results: list[TechnologySkill] = []
         for el in elements:
             cat_code = el.get("id", "")
             cat_title = el.get("name", "")
-            for ex in el.get("example", []):
+            for ex in [*el.get("example", []), *el.get("example_more", [])]:
                 results.append(
                     TechnologySkill(
                         category_code=cat_code,
                         category_title=cat_title,
-                        example_name=ex.get("name", ""),
+                        example_name=ex.get("title", ""),
                         hot_technology=ex.get("hot_technology", False),
                         in_demand=ex.get("in_demand", False),
                     )
@@ -313,12 +438,21 @@ class OnetClient:
         return results
 
     def hot_technology(self, code: str, start: int = 1, end: int = 50) -> list[HotTechnology]:
-        """Hot/in-demand technologies for an occupation."""
+        """Hot/in-demand technologies for an occupation (single page)."""
         data = self._get(
             f"/online/occupations/{code}/hot_technology",
             params={"start": start, "end": end},
         )
         return [HotTechnology.model_validate(ex) for ex in data.get("example", [])]
+
+    def hot_technology_all(self, code: str, page_size: int = 500) -> list[HotTechnology]:
+        """All hot technologies for an occupation, auto-paginated."""
+        return self._paginate(
+            f"/online/occupations/{code}/hot_technology",
+            "example",
+            HotTechnology,
+            page_size=page_size,
+        )
 
     # --- Related occupations ---
 
@@ -361,12 +495,22 @@ class OnetClient:
     def crosswalk_military(
         self, keyword: str, start: int = 1, end: int = 20
     ) -> list[MilitaryCrosswalk]:
-        """Military-to-civilian occupation crosswalk search."""
+        """Military-to-civilian occupation crosswalk search (single page)."""
         data = self._get(
             "/online/crosswalks/military",
             params={"keyword": keyword, "start": start, "end": end},
         )
         return [MilitaryCrosswalk.model_validate(o) for o in data.get("occupation", [])]
+
+    def crosswalk_military_all(self, keyword: str, page_size: int = 500) -> list[MilitaryCrosswalk]:
+        """Full military crosswalk search results, auto-paginated."""
+        return self._paginate(
+            "/online/crosswalks/military",
+            "occupation",
+            MilitaryCrosswalk,
+            page_size=page_size,
+            extra_params={"keyword": keyword},
+        )
 
     # --- Taxonomy ---
 
@@ -419,22 +563,35 @@ class OnetClient:
             answers: String of digits (1-5), one per item.
                      60 chars for Short Form, 30 for Mini-IP.
         """
+        _validate_profiler_answers(answers)
         data = self._get("/mnm/interestprofiler/results", params={"answers": answers})
         return [ProfilerResult.model_validate(r) for r in data.get("result", [])]
 
     def profiler_careers(
         self, answers: str, start: int = 1, end: int = 100
     ) -> list[ProfilerCareer]:
-        """Get career matches for a completed Interest Profiler.
+        """Get career matches for a completed Interest Profiler (single page).
 
         Args:
             answers: String of digits (1-5), one per item.
         """
+        _validate_profiler_answers(answers)
         data = self._get(
             "/mnm/interestprofiler/careers",
             params={"answers": answers, "start": start, "end": end},
         )
         return [ProfilerCareer.model_validate(c) for c in data.get("career", [])]
+
+    def profiler_careers_all(self, answers: str, page_size: int = 500) -> list[ProfilerCareer]:
+        """All career matches for a completed Interest Profiler, auto-paginated."""
+        _validate_profiler_answers(answers)
+        return self._paginate(
+            "/mnm/interestprofiler/careers",
+            "career",
+            ProfilerCareer,
+            page_size=page_size,
+            extra_params={"answers": answers},
+        )
 
     # --- Convenience: bundled profile ---
 
@@ -561,44 +718,41 @@ class OnetClient:
 
         Args:
             person_scores: Dict mapping RIASEC codes to scores.
-                           Keys can be full names ("Realistic") or single
-                           letters ("R"). Values on any scale — they get
-                           normalized internally.
+                           Keys can be full names ("Realistic"), single
+                           letters ("R"), or lowercase variants. Values on
+                           any scale — they get normalized internally.
             code: SOC occupation code.
-        """
-        # Normalize key names to full RIASEC labels
-        code_map = {
-            "R": "Realistic",
-            "I": "Investigative",
-            "A": "Artistic",
-            "S": "Social",
-            "E": "Enterprising",
-            "C": "Conventional",
-        }
-        riasec_order = [
-            "Realistic",
-            "Investigative",
-            "Artistic",
-            "Social",
-            "Enterprising",
-            "Conventional",
-        ]
 
+        Raises:
+            ValueError: If `person_scores` is empty or contains no recognized
+                        RIASEC keys.
+        """
+        if not person_scores:
+            raise ValueError("person_scores must contain at least one RIASEC dimension")
+
+        canonical_lower = {name.lower(): name for name in _RIASEC_NAMES}
         normalized: dict[str, float] = {}
+        unrecognized: list[str] = []
         for k, v in person_scores.items():
-            full_name = code_map.get(k.upper(), k)
-            # Also accept lowercase full names
-            for name in riasec_order:
-                if full_name.lower() == name.lower():
-                    normalized[name] = float(v)
-                    break
+            full_name = _RIASEC_CODE_TO_NAME.get(k.upper(), k)
+            canonical = canonical_lower.get(full_name.lower())
+            if canonical is None:
+                unrecognized.append(k)
+            else:
+                normalized[canonical] = float(v)
+
+        if not normalized:
+            raise ValueError(
+                f"No recognized RIASEC keys in {list(person_scores)}. "
+                f"Expected single letters (R/I/A/S/E/C) or full names."
+            )
 
         occ = self.occupation(code)
         occ_interests = self.interests(code)
         occ_map = {i.name: i.occupational_interest for i in occ_interests}
 
-        person_vec = [normalized.get(n, 0.0) for n in riasec_order]
-        occ_vec = [occ_map.get(n, 0.0) for n in riasec_order]
+        person_vec = [normalized.get(n, 0.0) for n in _RIASEC_NAMES]
+        occ_vec = [occ_map.get(n, 0.0) for n in _RIASEC_NAMES]
 
         score = self._cosine_similarity(person_vec, occ_vec)
 
@@ -616,8 +770,8 @@ class OnetClient:
             title=occ.title,
             score=round(score, 3),
             fit=fit,
-            person_profile={n: normalized.get(n, 0.0) for n in riasec_order},
-            occupation_profile={n: occ_map.get(n, 0.0) for n in riasec_order},
+            person_profile={n: normalized.get(n, 0.0) for n in _RIASEC_NAMES},
+            occupation_profile={n: occ_map.get(n, 0.0) for n in _RIASEC_NAMES},
         )
 
     def to_dataframe(
@@ -642,6 +796,7 @@ class OnetClient:
 
         Raises:
             ImportError: If pandas is not installed.
+            ValueError: If `sections` contains an unrecognized name.
         """
         try:
             import pandas as pd
@@ -651,7 +806,13 @@ class OnetClient:
             ) from err
 
         if sections is None:
-            sections = ["knowledge", "skills", "abilities", "work_styles", "interests"]
+            sections = list(_KSAO_SECTIONS)
+        else:
+            invalid = set(sections) - _KSAO_SECTIONS
+            if invalid:
+                raise ValueError(
+                    f"Unknown sections: {sorted(invalid)}. Valid options: {sorted(_KSAO_SECTIONS)}"
+                )
 
         rows: list[dict[str, Any]] = []
         for code in codes:

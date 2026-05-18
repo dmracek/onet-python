@@ -233,8 +233,11 @@ TECHNOLOGY_SKILLS_RESPONSE = {
             "id": "11.0",
             "name": "Computer based training software",
             "example": [
-                {"name": "Google Classroom", "hot_technology": True, "in_demand": True},
-                {"name": "Nearpod", "hot_technology": False, "in_demand": False},
+                {"title": "Google Classroom", "hot_technology": True, "in_demand": True},
+                {"title": "Nearpod", "hot_technology": False, "in_demand": False},
+            ],
+            "example_more": [
+                {"title": "Schoology", "hot_technology": False, "in_demand": False},
             ],
         },
     ],
@@ -262,10 +265,34 @@ TABLES_RESPONSE = {
 
 TABLE_INFO_RESPONSE = {
     "column": [
-        {"name": "O*NET-SOC Code", "type": "varchar", "description": "SOC code"},
-        {"name": "Element Name", "type": "varchar", "description": "Skill name"},
-        {"name": "Scale ID", "type": "varchar", "description": "Importance or Level"},
-        {"name": "Data Value", "type": "float", "description": "Score"},
+        {
+            "column_id": "O*NET-SOC Code",
+            "title": "O*NET-SOC Code",
+            "type": "varchar",
+            "description": "SOC code",
+            "optional": False,
+        },
+        {
+            "column_id": "Element Name",
+            "title": "Element Name",
+            "type": "varchar",
+            "description": "Skill name",
+            "optional": False,
+        },
+        {
+            "column_id": "Scale ID",
+            "title": "Scale ID",
+            "type": "varchar",
+            "description": "Importance or Level",
+            "optional": False,
+        },
+        {
+            "column_id": "Data Value",
+            "title": "Data Value",
+            "type": "float",
+            "description": "Score",
+            "optional": False,
+        },
     ],
 }
 
