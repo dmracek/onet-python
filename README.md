@@ -53,7 +53,7 @@ The CLI runs standalone via `uv run` (from the repo root):
 
 ```bash
 # Search occupations
-uv run onet/cli.py search "nurse"
+uv run onet/cli.py search "teacher"
 
 # Full KSAO + RIASEC profile by SOC code
 uv run onet/cli.py profile "29-1141.00"
