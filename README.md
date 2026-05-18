@@ -155,12 +155,11 @@ onet/
 
 ## Dependencies
 
-All are existing project dependencies (no new installs required):
-
 - `httpx` -- HTTP client
-- `pydantic` -- Response models and validation
-- `python-dotenv` -- .env loading
-- `typer` + `rich` -- CLI (in `[sim]` extras)
+- `pydantic` -- response models and validation
+- `python-dotenv` -- `.env` loading
+- `typer` + `rich` -- CLI
+- `pandas` -- optional, only needed for `OnetClient.to_dataframe()` (install via `pip install onet[dataframe]`)
 
 ## O\*NET Data Attribution
 
