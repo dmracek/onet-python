@@ -86,8 +86,9 @@ _BACKOFF_JITTER_SECONDS = 1.0
 
 def _backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter: ~1s, 2s, 4s, ... capped at 30s."""
-    base = min(_BACKOFF_BASE_SECONDS * (2**attempt), _BACKOFF_MAX_SECONDS)
-    return base + random.uniform(0.0, _BACKOFF_JITTER_SECONDS)
+    base: float = min(_BACKOFF_BASE_SECONDS * (2**attempt), _BACKOFF_MAX_SECONDS)
+    jitter: float = random.uniform(0.0, _BACKOFF_JITTER_SECONDS)
+    return base + jitter
 
 
 def _validate_profiler_answers(answers: str) -> None:
