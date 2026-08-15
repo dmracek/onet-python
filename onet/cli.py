@@ -195,7 +195,7 @@ def tables() -> None:
     table.add_column("ID", style="cyan")
     table.add_column("Title")
     for t in items:
-        table.add_row(t.id, t.title)
+        table.add_row(t.table_id, t.title)
     console.print(table)
 
 

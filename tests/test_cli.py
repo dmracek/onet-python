@@ -165,14 +165,14 @@ class TestRelatedCommand:
 class TestTablesCommand:
     def test_lists_tables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         tables = [
-            TableRef(id="Skills", title="Skills"),
-            TableRef(id="Knowledge", title="Knowledge"),
+            TableRef(table_id="essential_skills", title="Essential Skills"),
+            TableRef(table_id="occupation_data", title="Occupation Data"),
         ]
         monkeypatch.setattr(OnetClient, "tables", lambda *_a, **_k: tables)
         result = runner.invoke(app, ["tables"])
         assert result.exit_code == 0
-        assert "Skills" in result.output
-        assert "Knowledge" in result.output
+        assert "essential_skills" in result.output
+        assert "occupation_data" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ class TestTableCommand:
             return OnetClient(api_key="test-key", transport=transport)
 
         monkeypatch.setattr("onet.cli.OnetClient", _construct)
-        result = runner.invoke(app, ["table", "Skills"])
+        result = runner.invoke(app, ["table", "essential_skills"])
         assert result.exit_code == 0
         assert "Reading Comprehension" in result.output
         assert "Speaking" in result.output
