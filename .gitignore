@@ -31,3 +31,6 @@ env/
 
 # uv
 uv.lock
+
+# Claude Code (local settings, worktrees)
+.claude/
