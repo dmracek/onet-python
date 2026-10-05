@@ -306,10 +306,18 @@ class TestDetailedWorkActivities:
 class TestEducation:
     def test_returns_education_models(self, onet: OnetClient) -> None:
         items = onet.education("25-2021.00")
-        assert len(items) == 1
+        assert len(items) == 2
         assert isinstance(items[0], Education)
         assert items[0].title == "Bachelor's degree"
-        assert items[0].percentage_of_respondents == 82.0
+        assert items[0].percentage_of_respondents == 78.0
+
+    def test_code_is_an_int_ordinal(self, onet: OnetClient) -> None:
+        """Regression: `code` is an int level, not a SOC-code string.
+
+        The model previously typed it `str`, so every live call raised
+        ValidationError.
+        """
+        assert [e.code for e in onet.education("25-2021.00")] == [7, 8]
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +329,21 @@ class TestJobZone:
     def test_returns_job_zone_model(self, onet: OnetClient) -> None:
         jz = onet.job_zone("25-2021.00")
         assert isinstance(jz, JobZone)
-        assert jz.job_zone == 4
         assert "bachelor" in jz.education.lower()
+
+    def test_code_is_the_zone_number(self, onet: OnetClient) -> None:
+        """Regression: `code` is the 1-5 zone, not the SOC code.
+
+        The model previously typed it `str`, so every live call raised
+        ValidationError against the real int payload.
+        """
+        jz = onet.job_zone("25-2021.00")
+        assert jz.code == 4
+
+    def test_related_experience_is_populated(self, onet: OnetClient) -> None:
+        """Regression: the field is `related_experience`, not `experience`."""
+        jz = onet.job_zone("25-2021.00")
+        assert "work-related skill" in jz.related_experience
 
 
 # ---------------------------------------------------------------------------
@@ -339,15 +360,21 @@ class TestTechnology:
         assert items[0].hot_technology is True
 
     def test_technology_skills_flattened(self, onet: OnetClient) -> None:
-        """Category → example + example_more flattens into one item per tool."""
+        """Regression: the data key is `category`, not `element`.
+
+        Reading the wrong key returned an empty list for every occupation.
+        """
         items = onet.technology_skills("25-2021.00")
-        assert len(items) == 3
+        assert len(items) == 2
         assert all(isinstance(t, TechnologySkill) for t in items)
         assert items[0].category_title == "Computer based training software"
         assert items[0].example_name == "Google Classroom"
-        assert items[0].hot_technology is True
         assert items[1].example_name == "Nearpod"
-        assert items[2].example_name == "Schoology"  # from example_more
+        assert items[1].hot_technology is True
+
+    def test_technology_category_code_is_an_int(self, onet: OnetClient) -> None:
+        """Categories are UNSPSC numbers, not string element ids."""
+        assert onet.technology_skills("25-2021.00")[0].category_code == 43233501
 
 
 # ---------------------------------------------------------------------------
@@ -370,13 +397,17 @@ class TestRelatedOccupations:
 
 class TestDatabaseTables:
     def test_tables_list(self, onet: OnetClient) -> None:
+        """Regression: /database returns a top-level array, not an object."""
         items = onet.tables()
         assert len(items) == 2
         assert all(isinstance(t, TableRef) for t in items)
-        assert items[0].id == "Skills"
+
+    def test_table_ref_exposes_snake_case_id(self, onet: OnetClient) -> None:
+        """Regression: the identifier key is `table_id`, not `id`."""
+        assert onet.tables()[0].table_id == "essential_skills"
 
     def test_table_info(self, onet: OnetClient) -> None:
-        cols = onet.table_info("Skills")
+        cols = onet.table_info("essential_skills")
         assert len(cols) == 4
         assert all(isinstance(c, TableColumn) for c in cols)
         assert cols[0].column_id == "O*NET-SOC Code"
@@ -384,7 +415,7 @@ class TestDatabaseTables:
         assert cols[0].type == "varchar"
 
     def test_table_rows(self, onet: OnetClient) -> None:
-        rows = onet.table_rows("Skills")
+        rows = onet.table_rows("essential_skills")
         assert len(rows) == 2
         assert rows[0]["element_name"] == "Reading Comprehension"
 
@@ -395,11 +426,38 @@ class TestDatabaseTables:
 
 
 class TestCrosswalk:
-    def test_military_crosswalk(self, onet: OnetClient) -> None:
+    def test_military_crosswalk_reads_match_envelope(self, onet: OnetClient) -> None:
+        """Regression: the payload key is `match`, not `occupation`.
+
+        Reading the wrong key returned an empty list for every query.
+        """
         items = onet.crosswalk_military("infantry")
-        assert len(items) == 1
+        assert len(items) == 2
         assert isinstance(items[0], MilitaryCrosswalk)
-        assert items[0].code == "25-2021.00"
+
+    def test_military_crosswalk_code_is_the_military_occupation(self, onet: OnetClient) -> None:
+        """`code`/`title` identify the MOS, not the civilian SOC."""
+        item = onet.crosswalk_military("infantry")[0]
+        assert item.code == "00R"
+        assert item.title.startswith("Command Sergeant Major")
+
+    @pytest.mark.parametrize(
+        "index, expected_code, expected_title",
+        [
+            pytest.param(0, "11-3121.00", "Human Resources Managers", id="csm-to-hr-manager"),
+            pytest.param(1, "55-1016.00", "Infantry Officers", id="marine-officer-to-infantry"),
+        ],
+    )
+    def test_military_crosswalk_maps_to_civilian_occupations(
+        self,
+        onet: OnetClient,
+        index: int,
+        expected_code: str,
+        expected_title: str,
+    ) -> None:
+        """The civilian O*NET-SOC matches are the point of the crosswalk."""
+        occupations = onet.crosswalk_military("infantry")[index].occupations
+        assert [(o.code, o.title) for o in occupations] == [(expected_code, expected_title)]
 
 
 # ---------------------------------------------------------------------------

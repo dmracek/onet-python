@@ -70,9 +70,9 @@ uv run onet/cli.py tech "15-1252.00"
 # Related occupations
 uv run onet/cli.py related "15-1252.00"
 
-# Database tables
+# Database tables (table ids are snake_case — see `tables` for the full list)
 uv run onet/cli.py tables
-uv run onet/cli.py table "Skills"
+uv run onet/cli.py table "essential_skills"
 
 # Military crosswalk
 uv run onet/cli.py crosswalk "infantry"
@@ -110,7 +110,7 @@ uv run onet/cli.py crosswalk "infantry"
 
 | Method | Returns | Description |
 |---|---|---|
-| `technology_skills(code)` | `list[TechnologySkill]` | Tech skills flattened from category structure (includes `example` and `example_more`) |
+| `technology_skills(code)` | `list[TechnologySkill]` | Tech skills, flattened to one row per tool from the API's category structure |
 | `hot_technology(code)` / `hot_technology_all(code)` | `list[HotTechnology]` | Hot/in-demand technologies (paged / auto-paginated) |
 
 ### Relationships & Taxonomy
@@ -129,6 +129,8 @@ uv run onet/cli.py crosswalk "infantry"
 | `table_info(table_id)` | `list[TableColumn]` | Column metadata for a table |
 | `table_rows(table_id)` | `list[dict]` | All rows, auto-paginated |
 
+`table_id` is the snake_case identifier from `tables()` — e.g. `essential_skills`, `occupation_data`. Display titles like `"Skills"` are rejected with a 422.
+
 ### Convenience
 
 | Method | Description |
@@ -143,7 +145,7 @@ uv run onet/cli.py crosswalk "infantry"
 - **Pagination:** Paged methods accept `start`/`end` and return one page; `_all` variants loop with `_paginate()` until `end >= total`
 - **Errors:** `OnetHTTPError` for non-transient HTTP failures, `OnetTransientError` after retries exhausted, `MissingAPIKeyError` if `ONET_API_KEY` is unset — all subclass `OnetError`
 - **Normalization:** All API response keys are recursively converted to snake_case
-- **Models:** Every response is validated through Pydantic v2 models
+- **Models:** Every response is validated through Pydantic v2 models — including the *envelope*, not just the rows inside it. Envelopes declare their data field as required and set `extra="forbid"`, so a renamed or unexpected payload key raises a `ValidationError` instead of silently yielding an empty list. Row models stay lenient, so O\*NET can add fields without breaking callers.
 
 ## Project Structure
 
@@ -151,14 +153,14 @@ uv run onet/cli.py crosswalk "infantry"
 onet/
   __init__.py   # Public exports
   client.py     # OnetClient (httpx, auth, pagination, retry)
-  models.py     # Pydantic response models (17 types)
+  models.py     # Pydantic response models (31 row types + 16 envelopes)
   cli.py        # Typer CLI with Rich tables
 ```
 
 ## Dependencies
 
 - `httpx` -- HTTP client
-- `pydantic` -- response models and validation
+- `pydantic` (>=2.11) -- response models and validation
 - `python-dotenv` -- `.env` loading
 - `typer` + `rich` -- CLI
 - `pandas` -- optional, only needed for `OnetClient.to_dataframe()` (install via `pip install onet[dataframe]`)

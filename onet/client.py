@@ -11,41 +11,61 @@ import os
 import random
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from pydantic import BaseModel as _BaseModel
+from pydantic import TypeAdapter
 
 from onet.models import (
+    ActivityEnvelope,
     AnswerOption,
+    CareerEnvelope,
+    CategoryEnvelope,
     DetailedWorkActivity,
     Education,
+    EducationEnvelope,
+    ElementEnvelope,
+    ExampleEnvelope,
     HotTechnology,
     Interest,
     JobZone,
+    MatchEnvelope,
     MilitaryCrosswalk,
     OccupationDetail,
+    OccupationEnvelope,
     OccupationProfile,
     OccupationRef,
     ProfilerCareer,
     ProfilerQuestion,
     ProfilerQuestions,
+    ProfilerQuestionsEnvelope,
     ProfilerResult,
+    ProfilerResultsEnvelope,
     RiasecFitResult,
+    RowEnvelope,
     ScoredElement,
     SimilarityBreakdown,
     SimilarityResult,
     SkillGapItem,
     SkillGapResult,
     TableColumn,
+    TableInfoEnvelope,
     TableRef,
     Task,
+    TaskEnvelope,
+    TaxonomyEnvelope,
     TaxonomyMapping,
+    TechnologyCategory,
     TechnologySkill,
     WorkContext,
+    _PagedEnvelope,
 )
+
+# `/database` is the one endpoint with a top-level array. Build the adapter
+# once — schema analysis has real overhead.
+_TABLE_LIST = TypeAdapter(list[TableRef])
 
 
 class OnetError(Exception):
@@ -133,18 +153,17 @@ def _to_snake_case(s: str) -> str:
     return s.lower().strip("_")
 
 
-def _snake_keys(d: dict[str, Any]) -> dict[str, Any]:
-    """Recursively convert all dict keys to snake_case."""
-    out: dict[str, Any] = {}
-    for k, v in d.items():
-        sk = _to_snake_case(k)
-        if isinstance(v, dict):
-            out[sk] = _snake_keys(v)
-        elif isinstance(v, list):
-            out[sk] = [_snake_keys(i) if isinstance(i, dict) else i for i in v]
-        else:
-            out[sk] = v
-    return out
+def _snake_keys(data: Any) -> Any:
+    """Recursively convert dict keys to snake_case.
+
+    Accepts any JSON value, not just a dict: `/database` returns a top-level
+    array, and assuming a dict root here used to crash the whole call.
+    """
+    if isinstance(data, dict):
+        return {_to_snake_case(k): _snake_keys(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_snake_keys(item) for item in data]
+    return data
 
 
 def _get_api_key() -> str:
@@ -201,8 +220,12 @@ class OnetClient:
 
     # --- HTTP layer ---
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET with exponential backoff on transient errors.
+
+        Returns the decoded JSON with keys snake-cased — a dict for most
+        endpoints, a list for `/database`. Callers validate it through an
+        envelope model rather than indexing it by hand.
 
         Retries 429 and 5xx status codes plus `httpx.RequestError` (timeouts,
         connection errors). Honors `Retry-After` on 429 responses. Non-transient
@@ -246,59 +269,66 @@ class OnetClient:
             f"Retries exhausted for {path}"
         ) from last_transient  # pragma: no cover
 
-    def _paginate[T: _BaseModel](
+    def _paginate[E: _PagedEnvelope, T](
         self,
         path: str,
-        item_key: str,
-        model: type[T],
+        envelope: type[E],
+        items: Callable[[E], list[T]],
         page_size: int = 500,
         extra_params: dict[str, Any] | None = None,
     ) -> list[T]:
-        """Auto-paginate through a paged endpoint, returning all items."""
-        items: list[T] = []
+        """Auto-paginate through a paged endpoint, returning all items.
+
+        `envelope` validates each page and `items` pulls the rows out of it,
+        so a renamed payload key raises here instead of quietly ending the
+        loop with an empty result.
+        """
+        collected: list[T] = []
         start = 1
         while True:
             params: dict[str, Any] = {"start": start, "end": start + page_size - 1}
             if extra_params:
                 params.update(extra_params)
-            data = self._get(path, params=params)
-            raw_items = data.get(item_key, [])
-            items.extend(model.model_validate(el) for el in raw_items)
-            total = data.get("total", 0)
-            end = data.get("end", 0)
-            if end >= total or not raw_items:
+            page = envelope.model_validate(self._get(path, params=params))
+            rows = items(page)
+            collected.extend(rows)
+            if page.end >= page.total or not rows:
                 break
-            start = end + 1
-        return items
+            start = page.end + 1
+        return collected
 
-    def _detail_elements(
+    def _detail_elements[T](
         self,
         code: str,
         section: str,
+        envelope: type[ElementEnvelope[T]],
         start: int = 1,
         end: int = 500,
-    ) -> list[dict[str, Any]]:
-        """Fetch element list from an occupation detail section."""
-        data = self._get(
-            f"/online/occupations/{code}/details/{section}",
-            params={"start": start, "end": end},
+    ) -> list[T]:
+        """Fetch and validate one `element`-keyed occupation detail section."""
+        page = envelope.model_validate(
+            self._get(
+                f"/online/occupations/{code}/details/{section}",
+                params={"start": start, "end": end},
+            )
         )
-        elements: list[dict[str, Any]] = data.get("element", [])
-        return elements
+        return page.element
 
     # --- Search ---
 
     def search(self, keyword: str, start: int = 1, end: int = 20) -> list[OccupationRef]:
         """Search occupations by keyword, title, or SOC code (single page)."""
-        data = self._get("/online/search", params={"keyword": keyword, "start": start, "end": end})
-        return [OccupationRef.model_validate(o) for o in data.get("occupation", [])]
+        page = OccupationEnvelope[OccupationRef].model_validate(
+            self._get("/online/search", params={"keyword": keyword, "start": start, "end": end})
+        )
+        return page.occupation
 
     def search_all(self, keyword: str, page_size: int = 500) -> list[OccupationRef]:
         """Search occupations by keyword, auto-paginated across every page."""
         return self._paginate(
             "/online/search",
-            "occupation",
-            OccupationRef,
+            OccupationEnvelope[OccupationRef],
+            lambda page: page.occupation,
             page_size=page_size,
             extra_params={"keyword": keyword},
         )
@@ -307,12 +337,19 @@ class OnetClient:
 
     def occupations(self, start: int = 1, end: int = 1000) -> list[OccupationRef]:
         """List occupations (single page)."""
-        data = self._get("/online/occupations", params={"start": start, "end": end})
-        return [OccupationRef.model_validate(o) for o in data.get("occupation", [])]
+        page = OccupationEnvelope[OccupationRef].model_validate(
+            self._get("/online/occupations", params={"start": start, "end": end})
+        )
+        return page.occupation
 
     def occupations_all(self, page_size: int = 2000) -> list[OccupationRef]:
         """List all occupations with auto-pagination."""
-        return self._paginate("/online/occupations", "occupation", OccupationRef, page_size)
+        return self._paginate(
+            "/online/occupations",
+            OccupationEnvelope[OccupationRef],
+            lambda page: page.occupation,
+            page_size,
+        )
 
     def occupation(self, code: str) -> OccupationDetail:
         """Get occupation overview (description, titles)."""
@@ -323,58 +360,56 @@ class OnetClient:
 
     def knowledge(self, code: str) -> list[ScoredElement]:
         """Knowledge areas ranked by importance."""
-        return [ScoredElement.model_validate(el) for el in self._detail_elements(code, "knowledge")]
+        return self._detail_elements(code, "knowledge", ElementEnvelope[ScoredElement])
 
     def skills(self, code: str) -> list[ScoredElement]:
         """Skills ranked by importance."""
-        return [ScoredElement.model_validate(el) for el in self._detail_elements(code, "skills")]
+        return self._detail_elements(code, "skills", ElementEnvelope[ScoredElement])
 
     def abilities(self, code: str) -> list[ScoredElement]:
         """Abilities ranked by importance."""
-        return [ScoredElement.model_validate(el) for el in self._detail_elements(code, "abilities")]
+        return self._detail_elements(code, "abilities", ElementEnvelope[ScoredElement])
 
     def work_styles(self, code: str) -> list[ScoredElement]:
         """Work styles ranked by importance."""
-        return [
-            ScoredElement.model_validate(el) for el in self._detail_elements(code, "work_styles")
-        ]
+        return self._detail_elements(code, "work_styles", ElementEnvelope[ScoredElement])
 
     def work_activities(self, code: str) -> list[ScoredElement]:
         """Work activities ranked by importance."""
-        return [
-            ScoredElement.model_validate(el)
-            for el in self._detail_elements(code, "work_activities")
-        ]
+        return self._detail_elements(code, "work_activities", ElementEnvelope[ScoredElement])
 
     # --- Interests (RIASEC) ---
 
     def interests(self, code: str) -> list[Interest]:
         """RIASEC/Holland interest codes for an occupation."""
-        elements = self._detail_elements(code, "interests")
-        return [Interest.model_validate(el) for el in elements]
+        return self._detail_elements(code, "interests", ElementEnvelope[Interest])
 
     # --- Tasks ---
 
     def tasks(self, code: str, start: int = 1, end: int = 100) -> list[Task]:
         """Task statements for an occupation (single page)."""
-        data = self._get(
-            f"/online/occupations/{code}/details/tasks",
-            params={"start": start, "end": end},
+        page = TaskEnvelope[Task].model_validate(
+            self._get(
+                f"/online/occupations/{code}/details/tasks",
+                params={"start": start, "end": end},
+            )
         )
-        return [Task.model_validate(t) for t in data.get("task", [])]
+        return page.task
 
     def tasks_all(self, code: str, page_size: int = 500) -> list[Task]:
         """All task statements for an occupation, auto-paginated."""
         return self._paginate(
-            f"/online/occupations/{code}/details/tasks", "task", Task, page_size=page_size
+            f"/online/occupations/{code}/details/tasks",
+            TaskEnvelope[Task],
+            lambda page: page.task,
+            page_size=page_size,
         )
 
     # --- Work context ---
 
     def work_context(self, code: str) -> list[WorkContext]:
         """Work context elements."""
-        elements = self._detail_elements(code, "work_context")
-        return [WorkContext.model_validate(el) for el in elements]
+        return self._detail_elements(code, "work_context", ElementEnvelope[WorkContext])
 
     # --- Detailed work activities ---
 
@@ -382,11 +417,13 @@ class OnetClient:
         self, code: str, start: int = 1, end: int = 100
     ) -> list[DetailedWorkActivity]:
         """Detailed work activities (single page)."""
-        data = self._get(
-            f"/online/occupations/{code}/details/detailed_work_activities",
-            params={"start": start, "end": end},
+        page = ActivityEnvelope[DetailedWorkActivity].model_validate(
+            self._get(
+                f"/online/occupations/{code}/details/detailed_work_activities",
+                params={"start": start, "end": end},
+            )
         )
-        return [DetailedWorkActivity.model_validate(a) for a in data.get("activity", [])]
+        return page.activity
 
     def detailed_work_activities_all(
         self, code: str, page_size: int = 500
@@ -394,8 +431,8 @@ class OnetClient:
         """All detailed work activities for an occupation, auto-paginated."""
         return self._paginate(
             f"/online/occupations/{code}/details/detailed_work_activities",
-            "activity",
-            DetailedWorkActivity,
+            ActivityEnvelope[DetailedWorkActivity],
+            lambda page: page.activity,
             page_size=page_size,
         )
 
@@ -403,8 +440,10 @@ class OnetClient:
 
     def education(self, code: str) -> list[Education]:
         """Education level distribution."""
-        data = self._get(f"/online/occupations/{code}/details/education")
-        return [Education.model_validate(e) for e in data.get("response", [])]
+        page = EducationEnvelope[Education].model_validate(
+            self._get(f"/online/occupations/{code}/details/education")
+        )
+        return page.response
 
     # --- Job zone ---
 
@@ -416,42 +455,40 @@ class OnetClient:
     # --- Technology ---
 
     def technology_skills(self, code: str) -> list[TechnologySkill]:
-        """Technology skills, flattened from category → example structure.
-
-        Iterates both `example` and `example_more` lists so callers receive the
-        full set of technologies in each category, not just the first page.
-        """
-        elements = self._detail_elements(code, "technology_skills")
-        results: list[TechnologySkill] = []
-        for el in elements:
-            cat_code = el.get("id", "")
-            cat_title = el.get("name", "")
-            for ex in [*el.get("example", []), *el.get("example_more", [])]:
-                results.append(
-                    TechnologySkill(
-                        category_code=cat_code,
-                        category_title=cat_title,
-                        example_name=ex.get("title", ""),
-                        hot_technology=ex.get("hot_technology", False),
-                        in_demand=ex.get("in_demand", False),
-                    )
-                )
-        return results
+        """Technology skills, flattened from the category → example structure."""
+        page = CategoryEnvelope[TechnologyCategory].model_validate(
+            self._get(
+                f"/online/occupations/{code}/details/technology_skills",
+                params={"start": 1, "end": 500},
+            )
+        )
+        return [
+            TechnologySkill(
+                category_code=category.code,
+                category_title=category.title,
+                example_name=example.title,
+                hot_technology=example.hot_technology,
+            )
+            for category in page.category
+            for example in category.example
+        ]
 
     def hot_technology(self, code: str, start: int = 1, end: int = 50) -> list[HotTechnology]:
         """Hot/in-demand technologies for an occupation (single page)."""
-        data = self._get(
-            f"/online/occupations/{code}/hot_technology",
-            params={"start": start, "end": end},
+        page = ExampleEnvelope[HotTechnology].model_validate(
+            self._get(
+                f"/online/occupations/{code}/hot_technology",
+                params={"start": start, "end": end},
+            )
         )
-        return [HotTechnology.model_validate(ex) for ex in data.get("example", [])]
+        return page.example
 
     def hot_technology_all(self, code: str, page_size: int = 500) -> list[HotTechnology]:
         """All hot technologies for an occupation, auto-paginated."""
         return self._paginate(
             f"/online/occupations/{code}/hot_technology",
-            "example",
-            HotTechnology,
+            ExampleEnvelope[HotTechnology],
+            lambda page: page.example,
             page_size=page_size,
         )
 
@@ -459,37 +496,41 @@ class OnetClient:
 
     def related_occupations(self, code: str) -> list[OccupationRef]:
         """Occupations related to the given one."""
-        data = self._get(f"/online/occupations/{code}/details/related_occupations")
-        return [OccupationRef.model_validate(o) for o in data.get("occupation", [])]
+        page = OccupationEnvelope[OccupationRef].model_validate(
+            self._get(f"/online/occupations/{code}/details/related_occupations")
+        )
+        return page.occupation
 
     # --- Database tables ---
 
     def tables(self) -> list[TableRef]:
-        """List all available database tables."""
-        data = self._get("/database")
-        return [TableRef.model_validate(t) for t in data.get("table", [])]
+        """List all available database tables.
+
+        `/database` is the one endpoint with a top-level JSON array, so it is
+        validated with a TypeAdapter rather than an envelope model.
+        """
+        return _TABLE_LIST.validate_python(self._get("/database"))
 
     def table_info(self, table_id: str) -> list[TableColumn]:
-        """Column metadata for a database table."""
-        data = self._get(f"/database/info/{table_id}")
-        return [TableColumn.model_validate(c) for c in data.get("column", [])]
+        """Column metadata for a database table.
+
+        `table_id` is the snake_case identifier from `tables()` — e.g.
+        `essential_skills` or `occupation_data`. Display titles like "Skills"
+        are not valid and the API rejects them with a 422.
+        """
+        page = TableInfoEnvelope[TableColumn].model_validate(
+            self._get(f"/database/info/{table_id}")
+        )
+        return page.column
 
     def table_rows(self, table_id: str, page_size: int = 2000) -> list[dict[str, Any]]:
         """All rows from a database table, auto-paginated. Returns raw dicts."""
-        rows: list[dict[str, Any]] = []
-        start = 1
-        while True:
-            data = self._get(
-                f"/database/rows/{table_id}", params={"start": start, "end": start + page_size - 1}
-            )
-            raw = data.get("row", [])
-            rows.extend(raw)
-            total = data.get("total", 0)
-            end_idx = data.get("end", 0)
-            if end_idx >= total or not raw:
-                break
-            start = end_idx + 1
-        return rows
+        return self._paginate(
+            f"/database/rows/{table_id}",
+            RowEnvelope,
+            lambda page: page.row,
+            page_size=page_size,
+        )
 
     # --- Crosswalks ---
 
@@ -497,18 +538,20 @@ class OnetClient:
         self, keyword: str, start: int = 1, end: int = 20
     ) -> list[MilitaryCrosswalk]:
         """Military-to-civilian occupation crosswalk search (single page)."""
-        data = self._get(
-            "/online/crosswalks/military",
-            params={"keyword": keyword, "start": start, "end": end},
+        page = MatchEnvelope[MilitaryCrosswalk].model_validate(
+            self._get(
+                "/online/crosswalks/military",
+                params={"keyword": keyword, "start": start, "end": end},
+            )
         )
-        return [MilitaryCrosswalk.model_validate(o) for o in data.get("occupation", [])]
+        return page.match
 
     def crosswalk_military_all(self, keyword: str, page_size: int = 500) -> list[MilitaryCrosswalk]:
         """Full military crosswalk search results, auto-paginated."""
         return self._paginate(
             "/online/crosswalks/military",
-            "occupation",
-            MilitaryCrosswalk,
+            MatchEnvelope[MilitaryCrosswalk],
+            lambda page: page.match,
             page_size=page_size,
             extra_params={"keyword": keyword},
         )
@@ -522,8 +565,10 @@ class OnetClient:
         to_version: str = "2010",
     ) -> list[TaxonomyMapping]:
         """Map a SOC code between taxonomy versions."""
-        data = self._get(f"/taxonomy/{from_version}/{to_version}/{code}")
-        return [TaxonomyMapping.model_validate(o) for o in data.get("occupation", [])]
+        page = TaxonomyEnvelope[TaxonomyMapping].model_validate(
+            self._get(f"/taxonomy/{from_version}/{to_version}/{code}")
+        )
+        return page.occupation
 
     # --- Interest Profiler ---
 
@@ -534,25 +579,24 @@ class OnetClient:
             version: "questions" for 60-item Short Form,
                      "questions_30" for 30-item Mini-IP.
         """
+        envelope = ProfilerQuestionsEnvelope[ProfilerQuestion, AnswerOption]
         all_questions: list[ProfilerQuestion] = []
         answer_options: list[AnswerOption] = []
         total = 0
         start = 1
         while True:
-            data = self._get(
-                f"/mnm/interestprofiler/{version}", params={"start": start, "end": start + 59}
+            page = envelope.model_validate(
+                self._get(
+                    f"/mnm/interestprofiler/{version}", params={"start": start, "end": start + 59}
+                )
             )
             if not answer_options:
-                answer_options = [
-                    AnswerOption.model_validate(o) for o in data.get("answer_option", [])
-                ]
-                total = data.get("total", 0)
-            all_questions.extend(
-                ProfilerQuestion.model_validate(q) for q in data.get("question", [])
-            )
-            if data.get("end", 0) >= data.get("total", 0) or not data.get("question"):
+                answer_options = page.answer_option
+                total = page.total
+            all_questions.extend(page.question)
+            if page.end >= page.total or not page.question:
                 break
-            start = data["end"] + 1
+            start = page.end + 1
         return ProfilerQuestions(
             total=total, answer_options=answer_options, questions=all_questions
         )
@@ -565,8 +609,10 @@ class OnetClient:
                      60 chars for Short Form, 30 for Mini-IP.
         """
         _validate_profiler_answers(answers)
-        data = self._get("/mnm/interestprofiler/results", params={"answers": answers})
-        return [ProfilerResult.model_validate(r) for r in data.get("result", [])]
+        page = ProfilerResultsEnvelope[ProfilerResult].model_validate(
+            self._get("/mnm/interestprofiler/results", params={"answers": answers})
+        )
+        return page.result
 
     def profiler_careers(
         self, answers: str, start: int = 1, end: int = 100
@@ -577,19 +623,21 @@ class OnetClient:
             answers: String of digits (1-5), one per item.
         """
         _validate_profiler_answers(answers)
-        data = self._get(
-            "/mnm/interestprofiler/careers",
-            params={"answers": answers, "start": start, "end": end},
+        page = CareerEnvelope[ProfilerCareer].model_validate(
+            self._get(
+                "/mnm/interestprofiler/careers",
+                params={"answers": answers, "start": start, "end": end},
+            )
         )
-        return [ProfilerCareer.model_validate(c) for c in data.get("career", [])]
+        return page.career
 
     def profiler_careers_all(self, answers: str, page_size: int = 500) -> list[ProfilerCareer]:
         """All career matches for a completed Interest Profiler, auto-paginated."""
         _validate_profiler_answers(answers)
         return self._paginate(
             "/mnm/interestprofiler/careers",
-            "career",
-            ProfilerCareer,
+            CareerEnvelope[ProfilerCareer],
+            lambda page: page.career,
             page_size=page_size,
             extra_params={"answers": answers},
         )

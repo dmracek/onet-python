@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from onet.models import (
+    ElementEnvelope,
     Interest,
     JobZone,
     OccupationProfile,
@@ -113,20 +115,20 @@ class TestOccupationRef:
 class TestJobZone:
     def test_full_fields(self) -> None:
         jz = JobZone(
-            code="25-2021.00",
+            code=4,
             title="Job Zone Four",
             education="Bachelor's degree",
-            experience="Two to four years",
+            related_experience="Two to four years",
             job_training="Few months to one year",
-            job_zone=4,
-            svp_range="7.0 to < 8.0",
+            job_zone_examples="Sales managers, graphic designers",
+            svp_range="(7.0 to < 8.0)",
         )
-        assert jz.job_zone == 4
+        assert jz.code == 4
         assert "bachelor" in jz.education.lower()
 
     def test_defaults(self) -> None:
-        jz = JobZone(code="x", title="Minimal")
-        assert jz.job_zone == 0
+        jz = JobZone(code=1, title="Minimal")
+        assert jz.related_experience == ""
         assert jz.education == ""
 
 
@@ -137,24 +139,25 @@ class TestJobZone:
 
 class TestTechnologySkill:
     @pytest.mark.parametrize(
-        "hot, in_demand",
+        "hot",
         [
-            pytest.param(True, True, id="hot-and-in-demand"),
-            pytest.param(True, False, id="hot-only"),
-            pytest.param(False, True, id="in-demand-only"),
-            pytest.param(False, False, id="neither"),
+            pytest.param(True, id="hot-technology"),
+            pytest.param(False, id="not-hot"),
         ],
     )
-    def test_boolean_flags(self, hot: bool, in_demand: bool) -> None:
+    def test_hot_technology_flag(self, hot: bool) -> None:
         ts = TechnologySkill(
-            category_code="11.0",
-            category_title="Software",
-            example_name="Tool",
+            category_code=43233501,
+            category_title="Electronic mail software",
+            example_name="Microsoft Outlook",
             hot_technology=hot,
-            in_demand=in_demand,
         )
         assert ts.hot_technology == hot
-        assert ts.in_demand == in_demand
+
+    def test_category_code_is_the_unspsc_int(self) -> None:
+        """The API's category `code` is a UNSPSC number, not a string id."""
+        ts = TechnologySkill(category_code=43233501, category_title="Email")
+        assert ts.category_code == 43233501
 
 
 # ---------------------------------------------------------------------------
@@ -186,3 +189,49 @@ class TestOccupationProfile:
         assert len(p.interests) == 1
         assert p.interests[0].occupational_interest == 100
         assert p.knowledge[0].importance == 97
+
+
+# ---------------------------------------------------------------------------
+# Response envelopes
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeStrictness:
+    """The envelopes exist to turn silent data loss into a loud error.
+
+    Three shipped bugs had the same shape: the client read a payload key the
+    API does not use, `.get(key, [])` returned the default, and the caller got
+    an empty list with no sign anything was wrong. These tests pin the
+    behavior that makes that impossible.
+    """
+
+    def test_missing_data_key_raises(self) -> None:
+        """A renamed data key must raise, not yield an empty list."""
+        with pytest.raises(ValidationError, match="element"):
+            ElementEnvelope[ScoredElement].model_validate(
+                {"start": 1, "end": 2, "total": 2, "occupation": []}
+            )
+
+    def test_unexpected_key_raises(self) -> None:
+        """An unmodeled top-level key must raise rather than be ignored."""
+        with pytest.raises(ValidationError, match="category"):
+            ElementEnvelope[ScoredElement].model_validate({"element": [], "category": []})
+
+    def test_empty_data_key_is_allowed(self) -> None:
+        """A present-but-empty list is a real answer — O*NET has coverage gaps."""
+        page = ElementEnvelope[ScoredElement].model_validate(
+            {"start": 1, "end": 0, "total": 0, "element": []}
+        )
+        assert page.element == []
+
+    def test_next_is_optional(self) -> None:
+        """`next` is absent on the last page and on non-paging endpoints."""
+        page = ElementEnvelope[ScoredElement].model_validate({"total": 1, "element": []})
+        assert page.next is None
+
+    def test_items_stay_lenient(self) -> None:
+        """Strictness is on the envelope; rows may gain fields without breaking."""
+        page = ElementEnvelope[ScoredElement].model_validate(
+            {"element": [{"id": "2.A.1.a", "name": "Reading", "brand_new_field": 1}]}
+        )
+        assert page.element[0].name == "Reading"
